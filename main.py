@@ -16,7 +16,7 @@
 #version 16:定义鼠标事件:轮廓可移动 鼠标靠近透明色
 #version 17:编辑顶点 三种模式划分
 #version 18:弹出标签框(图像class分类信息;编辑完成按钮;格式文件选项;截取功能) 轮廓编号i;图像内坐标XY信息 生成编辑文件
-#version 19:添加图片拖拽功能
+#version 19:添加图像拖拽功能;图像缩放功能;
 
 import os
 import sys
@@ -27,51 +27,27 @@ from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 
 DISTANCE_LIMIT = 4
+CREATING, MOVING, ADJUSTING = list(range(3))
 
-class RectLabel(object):
-
-    def __init__(self):
-        super().__init__()
-        self.startPoint = None
-        self.endPoint = None
-        self.nearPoint = None
-        self.near_index = -1
-        self.referPoint = None
-        self.editPoint = None
-        self.creating = False
-        self.moving = False
-        self.adjusting = False
-        self.scaling = False
-        self.rectPoints = []
-        self.rectLabels = []
-        self.highlight_index = -1
-
-    def addPoint(self, labelPoint):
-        if not self.startPoint:
-            self.startPoint = labelPoint
-        elif not self.endPoint:
-            self.endPoint = labelPoint
-
-    def appendRectPoint(self):
-        self.rectPoints.append([self.startPoint, self.endPoint])
-        self.startPoint = None
-        self.endPoint = None
-
-    def euclidDis(self, labelPoint, startPoint, endPoint):
-        return math.hypot(labelPoint.x() - (startPoint.x() + endPoint.x()) / 2.0,
-                        labelPoint.y() - (startPoint.y() + endPoint.y()) / 2.0)
-
-    def checkInsideRect(self, labelPoint, startPoint, endPoint):
+class PointCalculator(object):
+    @staticmethod
+    def checkInsideRect(labelPoint, startPoint, endPoint):
         return (startPoint.x()-labelPoint.x()) * (endPoint.x()-labelPoint.x()) <= 0 and \
                  (startPoint.y()-labelPoint.y()) * (endPoint.y()-labelPoint.y()) <= 0
 
-    def findNearestPoint(self, labelPoint):
+    @staticmethod
+    def euclidDis(labelPoint, startPoint, endPoint):
+        return math.hypot(labelPoint.x() - (startPoint.x() + endPoint.x()) / 2.0,
+                        labelPoint.y() - (startPoint.y() + endPoint.y()) / 2.0)
+
+    @staticmethod
+    def findNearestPoint(labelPoint, rectPoints):
         index = -1
         nearPoint = None
         distance = -1
         x, y = labelPoint.x(), labelPoint.y()
         
-        for i, [startPoint, endPoint] in enumerate(self.rectPoints):
+        for i, [startPoint, endPoint] in enumerate(rectPoints):
             x1, y1 = startPoint.x(), startPoint.y()
             x2, y2 = endPoint.x(), endPoint.y()
             dis11 = math.hypot(x-x1, y-y1)
@@ -100,24 +76,133 @@ class RectLabel(object):
             return nearPoint, index
         return None, None
 
-    def findNearestRect(self, labelPoint):
+    @staticmethod
+    def findNearestRect(labelPoint, rectPoints):
         index = -1
         distance = -1
-        for i, [startPoint, endPoint] in enumerate(self.rectPoints):
-            if self.checkInsideRect(labelPoint, startPoint, endPoint):
-                if distance == -1 or distance > self.euclidDis(labelPoint, startPoint, endPoint):
-                    distance = self.euclidDis(labelPoint, startPoint, endPoint)
+        for i, [startPoint, endPoint] in enumerate(rectPoints):
+            if PointCalculator.checkInsideRect(labelPoint, startPoint, endPoint):
+                if distance == -1 or distance > PointCalculator.euclidDis(labelPoint, startPoint, endPoint):
+                    distance = PointCalculator.euclidDis(labelPoint, startPoint, endPoint)
                     index = i
         return index
 
+class RectLabel(object):
+
+    def __init__(self):
+        super().__init__()
+        self.startPoint = None
+        self.endPoint = None
+        self.nearPoint = None
+        self.near_index = -1
+        self.referPoint = None
+        self.movePoint = None
+        self.benchPoints = []
+        self.editing_mode = None
+        self.adjustStatus = False
+        self.rectPoints = []
+        self.rectLabels = []
+        self.highlight_index = -1
+
+    def addPoint(self, labelPoint):
+        if not self.startPoint:
+            self.startPoint = labelPoint
+        elif not self.endPoint:
+            self.endPoint = labelPoint
+
+    def appendRectPoint(self):
+        if self.startPoint and self.endPoint:
+            self.rectPoints.append([self.startPoint, self.endPoint])
+            self.startPoint = None
+            self.endPoint = None
+
+    def moveRect(self, labelPoint):
+        if not self.benchPoints:
+            index = PointCalculator.findNearestRect(labelPoint, self.rectPoints)
+            if index >= 0:
+                self.highlight_index = index
+                self.movePoint = labelPoint
+                self.benchPoints = self.rectPoints[self.highlight_index]
+            else:
+                self.highlight_index = -1
+        else:
+            self.movePoint = None
+            self.benchPoints = None
+
+    def moveRectPoint(self, labelPoint):
+        if self.highlight_index >= 0 and self.movePoint and self.benchPoints:
+            self.rectPoints[self.highlight_index] = \
+                [labelPoint - self.movePoint + self.benchPoints[0],
+                labelPoint - self.movePoint + self.benchPoints[1]]
+
+    def changeAdjustStatus(self):
+        if not self.adjustStatus and self.nearPoint:
+            self.adjustStatus = True
+        elif self.adjustStatus:
+            self.adjustStatus = False
+
+    def adjustRectPoints(self, labelPoint):
+        if not self.adjustStatus:
+            self.nearPoint, self.near_index = PointCalculator.findNearestPoint(labelPoint, self.rectPoints)
+            if self.rectPoints and self.nearPoint:
+                startPoint, endPoint = self.rectPoints[self.near_index]
+                x, y = -1, -1
+                x0, y0 = self.nearPoint.x(), self.nearPoint.y()
+                x1, y1 = startPoint.x(), startPoint.y()
+                x2, y2 = endPoint.x(), endPoint.y()
+                if x1 == x0:
+                    x = x2
+                else:
+                    x = x1
+                
+                if y1 == y0:
+                    y = y2
+                else:
+                    y = y1
+                self.referPoint = QPoint(x, y)
+        else:
+            if self.rectPoints and self.nearPoint:
+                self.rectPoints[self.near_index] = [labelPoint, self.referPoint]
+
+    def drawCreateRect(self, painter, labelPoint):
+        if self.startPoint:
+            painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
+            painter.setBrush(QBrush(Qt.red, Qt.BDiagPattern))
+            painter.drawRect(self.startPoint.x(), self.startPoint.y(), 
+                            labelPoint.x()-self.startPoint.x(),
+                            labelPoint.y()-self.startPoint.y())
+            painter.drawLine(self.startPoint.x(), self.startPoint.y(), 
+                            labelPoint.x(), labelPoint.y())
+            painter.setBrush(QBrush(Qt.green, Qt.SolidPattern))
+            painter.drawEllipse(QPoint(self.startPoint.x(), self.startPoint.y()), 3, 3)
+        if self.endPoint:
+            painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
+            painter.drawEllipse(QPoint(self.endPoint.x(), self.endPoint.y()), 3, 3)
+    
+    def drawAdjustRect(self, painter):
+        startPoint, endPoint = self.rectPoints[self.near_index]
+        x1 = startPoint.x()
+        y1 = startPoint.y()
+        x2 = endPoint.x()
+        y2 = endPoint.y()
+        painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
+        painter.setBrush(QBrush(QColor(0, 255, 0, 30), Qt.SolidPattern))
+        painter.drawRect(x1, y1, x2-x1, y2-y1)
+        painter.setPen(QPen(Qt.red, 2, Qt.SolidLine))
+        painter.setBrush(QBrush(Qt.red, Qt.SolidPattern))
+        painter.drawRect(x1-5, y1-5, 10, 10)
+        painter.drawRect(x2-5, y1-5, 10, 10)
+        painter.drawRect(x1-5, y2-5, 10, 10)
+        painter.drawRect(x2-5, y2-5, 10, 10)
+    
     def drawRect(self, painter, labelPoint):
         painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
         for i, [startPoint, endPoint] in enumerate(self.rectPoints):
-            if self.checkInsideRect(labelPoint, startPoint, endPoint):
+            if PointCalculator.checkInsideRect(labelPoint, startPoint, endPoint):
                 painter.setBrush(QBrush(QColor(0, 255, 0, 30), Qt.SolidPattern))
             else:
                 painter.setBrush(QBrush(QColor(0, 255, 0, 0), Qt.SolidPattern))
-            if i == self.highlight_index and self.moving:
+            if i == self.highlight_index and self.editing_mode == MOVING:
                 painter.setBrush(QBrush(QColor(0, 0, 255, 30), Qt.SolidPattern))
             if i != self.near_index:
                 painter.drawRect(startPoint.x(), startPoint.y(), 
@@ -133,36 +218,11 @@ class RectLabel(object):
                 painter.drawEllipse(QPoint(endPoint.x(), endPoint.y()), 3, 3)
                 painter.drawEllipse(QPoint(endPoint.x(), startPoint.y()), 3, 3)
         
-        if self.creating:
-            if self.startPoint:
-                painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
-                painter.setBrush(QBrush(Qt.red, Qt.BDiagPattern))
-                painter.drawRect(self.startPoint.x(), self.startPoint.y(), 
-                                labelPoint.x()-self.startPoint.x(),
-                                labelPoint.y()-self.startPoint.y())
-                painter.drawLine(self.startPoint.x(), self.startPoint.y(), 
-                                labelPoint.x(), labelPoint.y())
-                painter.setBrush(QBrush(Qt.green, Qt.SolidPattern))
-                painter.drawEllipse(QPoint(self.startPoint.x(), self.startPoint.y()), 3, 3)
-            if self.endPoint:
-                painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
-                painter.drawEllipse(QPoint(self.endPoint.x(), self.endPoint.y()), 3, 3)
+        if self.editing_mode == CREATING:
+            self.drawCreateRect(painter, labelPoint)
         
-        if self.adjusting and self.nearPoint:
-            startPoint, endPoint = self.rectPoints[self.near_index]
-            x1 = startPoint.x()
-            y1 = startPoint.y()
-            x2 = endPoint.x()
-            y2 = endPoint.y()
-            painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
-            painter.setBrush(QBrush(QColor(0, 255, 0, 30), Qt.SolidPattern))
-            painter.drawRect(x1, y1, x2-x1, y2-y1)
-            painter.setPen(QPen(Qt.red, 2, Qt.SolidLine))
-            painter.setBrush(QBrush(Qt.red, Qt.SolidPattern))
-            painter.drawRect(x1-5, y1-5, 10, 10)
-            painter.drawRect(x2-5, y1-5, 10, 10)
-            painter.drawRect(x1-5, y2-5, 10, 10)
-            painter.drawRect(x2-5, y2-5, 10, 10)
+        if self.editing_mode == ADJUSTING and self.nearPoint:
+            self.drawAdjustRect(painter)
 
 class LabelDialog(QDialog):
 
@@ -193,6 +253,7 @@ class ImageLabel(QLabel):
     def __init__(self):
         super().__init__()
         self.tracking = False
+        self.editing_mode = None
         self.shape_mode = None
         self.editLabel = None
         self.labelDialog = LabelDialog(self)
@@ -200,8 +261,6 @@ class ImageLabel(QLabel):
         self.scale = 1
         self.labelPoint = QPoint()
         self.imagePoint = QPoint()
-        self.movePoint = None
-        self.benchPoints = []
 
         self.image = QImage()
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -228,47 +287,11 @@ class ImageLabel(QLabel):
     def canvas_pos(self, point):
         return (point + self.offset_to_center()) * self.scale
 
-    def moveRect(self):
-        if not self.benchPoints:
-            index = self.editLabel.findNearestRect(self.labelPoint)
-            if index >= 0:
-                self.editLabel.highlight_index = index
-                self.movePoint = self.labelPoint
-                self.benchPoints = self.editLabel.rectPoints[self.editLabel.highlight_index]
-            else:
-                self.editLabel.highlight_index = -1
-        else:
-            self.movePoint = None
-            self.benchPoints = None
-
-    def changeRectPoints(self):
-        if not self.editLabel.scaling:
-            self.editLabel.nearPoint, self.editLabel.near_index = self.editLabel.findNearestPoint(self.labelPoint)
-            if self.editLabel.rectPoints and self.editLabel.nearPoint:
-                startPoint, endPoint = self.editLabel.rectPoints[self.editLabel.near_index]
-                x, y = -1, -1
-                x0, y0 = self.editLabel.nearPoint.x(), self.editLabel.nearPoint.y()
-                x1, y1 = startPoint.x(), startPoint.y()
-                x2, y2 = endPoint.x(), endPoint.y()
-                if x1 == x0:
-                    x = x2
-                else:
-                    x = x1
-                
-                if y1 == y0:
-                    y = y2
-                else:
-                    y = y1
-                self.editLabel.referPoint = QPoint(x, y)
-        else:
-            if self.editLabel.rectPoints and self.editLabel.nearPoint:
-                self.editLabel.rectPoints[self.editLabel.near_index] = [self.labelPoint, self.editLabel.referPoint]
-
     def getImageRect(self):
         pos = self.canvas_pos(QPoint(0, 0))
         return pos.x(), pos.y(), self.image.width() * self.scale, self.image.height() * self.scale
 
-    def drawCrossLine(self, painter):
+    def drawTrackingLine(self, painter):
         _, _, w0, h0 = self.getImageRect()
         hl1 = self.canvas_pos(QPoint(0, self.imagePoint.y()))
         hl2 = self.canvas_pos(QPoint(w0, self.imagePoint.y()))
@@ -283,7 +306,7 @@ class ImageLabel(QLabel):
             painter = QPainter(self)
             if self.tracking:
                 painter.setPen(QPen(Qt.black, 2, Qt.SolidLine))
-                self.drawCrossLine(painter)
+                self.drawTrackingLine(painter)
                 painter.drawText(QRect(self.labelPoint.x(), self.labelPoint.y(), 80, -60), 
                                 Qt.AlignCenter, "(%d, %d)" % (self.imagePoint.x(), self.imagePoint.y()))
             if self.shape_mode == "Rect":
@@ -301,15 +324,12 @@ class ImageLabel(QLabel):
         self.imagePoint = self.image_pos(self.labelPoint)
         super(ImageLabel, self).mousePressEvent(event)
         if self.shape_mode == "Rect" and self.editLabel:
-            if self.editLabel.creating:
+            if self.editLabel.editing_mode == CREATING:
                 self.editLabel.addPoint(self.labelPoint)
-            elif self.editLabel.moving:
-                self.moveRect()
-            elif self.editLabel.adjusting:
-                if not self.editLabel.scaling and self.editLabel.nearPoint:
-                    self.editLabel.scaling = True
-                elif self.editLabel.scaling:
-                    self.editLabel.scaling = False
+            elif self.editLabel.editing_mode == MOVING:
+                self.editLabel.moveRect(self.labelPoint)
+            elif self.editLabel.editing_mode == ADJUSTING:
+                self.editLabel.changeAdjustStatus()
 
         self.update()
 
@@ -321,16 +341,12 @@ class ImageLabel(QLabel):
         else:
             self.parent().window().status.showMessage("")
         if self.shape_mode == "Rect" and self.editLabel:
-            if self.editLabel.creating:
-                if self.editLabel.startPoint and self.editLabel.endPoint:
-                    self.editLabel.appendRectPoint()
-            elif self.editLabel.moving:
-                if self.editLabel.highlight_index >= 0 and self.movePoint and self.benchPoints:
-                    self.editLabel.rectPoints[self.editLabel.highlight_index] = \
-                        [self.labelPoint - self.movePoint + self.benchPoints[0],
-                        self.labelPoint - self.movePoint + self.benchPoints[1]]
-            elif self.editLabel.adjusting:
-                self.changeRectPoints()
+            if self.editLabel.editing_mode == CREATING:
+                self.editLabel.appendRectPoint()
+            elif self.editLabel.editing_mode == MOVING:
+                self.editLabel.moveRectPoint(self.labelPoint)
+            elif self.editLabel.editing_mode == ADJUSTING:
+                self.editLabel.adjustRectPoints(self.labelPoint)
                 
         super(ImageLabel, self).mouseMoveEvent(event)
         self.update()
@@ -339,7 +355,7 @@ class ImageLabel(QLabel):
         self.labelPoint = event.pos()
         self.imagePoint = self.image_pos(self.labelPoint)
         if self.shape_mode == "Rect" and self.editLabel:
-            if self.editLabel.creating:
+            if self.editLabel.editing_mode == CREATING:
                 if self.editLabel.startPoint and self.editLabel.endPoint:
                     text = self.labelDialog.pop_up()
                     self.editLabel.appendRectPoint()
@@ -368,7 +384,7 @@ class MainWindow(QMainWindow):
         fileMenu.addAction(openAction)
 
     def setToolBar(self):
-        self.toolbar = self.addToolBar('Exit')
+        self.toolbar = self.addToolBar('')
         self.addToolBar(Qt.LeftToolBarArea, self.toolbar)
 
     def setScrollArea(self):
@@ -460,26 +476,17 @@ class MainWindow(QMainWindow):
     def changeCreatingMode(self):
         if self.createRadiobox.isChecked():
             if self.imageLabel.editLabel:
-                self.imageLabel.editLabel.creating = True
-        else:
-            if self.imageLabel.editLabel:
-                self.imageLabel.editLabel.creating = False
+                self.imageLabel.editLabel.editing_mode = CREATING
 
     def changeMovingMode(self):
         if self.moveRadiobox.isChecked():
             if self.imageLabel.editLabel:
-                self.imageLabel.editLabel.moving = True
-        else:
-            if self.imageLabel.editLabel:
-                self.imageLabel.editLabel.moving = False
+                self.imageLabel.editLabel.editing_mode = MOVING
 
     def changeAdjustMode(self):
         if self.adjustRadiobox.isChecked():
             if self.imageLabel.editLabel:
-                self.imageLabel.editLabel.adjusting = True
-        else:
-            if self.imageLabel.editLabel:
-                self.imageLabel.editLabel.adjusting = False
+                self.imageLabel.editLabel.editing_mode = ADJUSTING
 
     def changeShapeMode(self, checked, text):
         self.imageLabel.shape_mode = text
@@ -508,7 +515,6 @@ class MainWindow(QMainWindow):
                 "Directory Name": path}
 
     def setTable(self):
-
         item22 = QStandardItem("{}".format(self.imageLabel.image.width()))
         item32 = QStandardItem("{}".format(self.imageLabel.image.height()))
         item42 = QStandardItem("{}".format(self.imageLabel.image.depth()))
