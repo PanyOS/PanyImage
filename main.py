@@ -15,8 +15,10 @@
 #version 15:抽取矩形编辑类:Rect轮廓
 #version 16:定义鼠标事件:轮廓可移动 鼠标靠近透明色
 #version 17:编辑顶点 三种模式划分
-#version 18:弹出标签框(图像class分类信息;编辑完成按钮;格式文件选项;截取功能) 轮廓编号i;图像内坐标XY信息 生成编辑文件
-#version 19:添加图像拖拽功能;图像缩放功能;
+#version 18:弹出标签框(图像class分类信息;编辑完成按钮;格式文件选项;截取功能) 轮廓编号i;图像内坐标XY信息 
+#version 19:关闭时有标注轮廓:提示保存,生成编辑文件(Pascal Voc);简化初始化参数
+#version 20:弹出编辑格式文件保存提示框QMessage;轮廓撤销,轮廓删减
+#version 21:添加图像拖拽功能;图像缩放功能
 
 import os
 import sys
@@ -26,8 +28,11 @@ from PyQt5.QtGui import *
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 
+from lib.support_formats import PascalVocWriter
+
 DISTANCE_LIMIT = 4
 CREATING, MOVING, ADJUSTING = list(range(3))
+SUPPORT_FMTS = ["Pascal Voc", "Yolo"]
 
 class PointCalculator(object):
     @staticmethod
@@ -101,7 +106,7 @@ class RectLabel(object):
         self.editing_mode = None
         self.adjustStatus = False
         self.rectPoints = []
-        self.rectLabels = []
+        self.rectClasses = []
         self.highlight_index = -1
 
     def addPoint(self, labelPoint):
@@ -229,20 +234,44 @@ class LabelDialog(QDialog):
     def __init__(self, parent):
         super(LabelDialog, self).__init__(parent)
 
+        self.difficult = False
+        self.name_list = []
+        self.completer = QCompleter(self.name_list)
+        self.writerType = None
         self.edit = QLineEdit()
+        self.edit.setCompleter(self.completer)
+
         layout = QVBoxLayout()
         layout.addWidget(self.edit)
-        self.combobox = QComboBox()
-        self.combobox.addItem("Pascal Voc")
-        self.combobox.addItem("Yolo")
-        layout.addWidget(self.combobox)
+        self.diffCheckbox = QCheckBox('difficult', self)
+        self.diffCheckbox.clicked.connect(self.changeDiffCheck)
+        layout.addWidget(self.diffCheckbox)
+        formatCombobox = QComboBox()
+        for fmt in SUPPORT_FMTS:
+            formatCombobox.addItem(fmt)
+        formatCombobox.currentTextChanged.connect(self.changeWriter)
+        self.writerType = SUPPORT_FMTS[0]
+        layout.addWidget(formatCombobox)
         self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, Qt.Horizontal, self)
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
         layout.addWidget(self.button_box)
         self.setLayout(layout)
 
-    def pop_up(self, text=''):
+    def changeDiffCheck(self):
+        if self.diffCheckbox.isChecked():
+            self.difficult = True
+        else:
+            self.difficult = False
+
+    def changeWriter(self, text):
+        self.writerType = text
+
+    def update(self, text):
+        self.name_list.append(text)
+        self.completer.model().setStringList(self.name_list)
+
+    def popUp(self, text=''):
         self.edit.setText(text)
         self.edit.setSelection(0, len(text))
         self.edit.setFocus(Qt.PopupFocusReason)
@@ -253,7 +282,6 @@ class ImageLabel(QLabel):
     def __init__(self):
         super().__init__()
         self.tracking = False
-        self.editing_mode = None
         self.shape_mode = None
         self.editLabel = None
         self.labelDialog = LabelDialog(self)
@@ -341,9 +369,7 @@ class ImageLabel(QLabel):
         else:
             self.parent().window().status.showMessage("")
         if self.shape_mode == "Rect" and self.editLabel:
-            if self.editLabel.editing_mode == CREATING:
-                self.editLabel.appendRectPoint()
-            elif self.editLabel.editing_mode == MOVING:
+            if self.editLabel.editing_mode == MOVING:
                 self.editLabel.moveRectPoint(self.labelPoint)
             elif self.editLabel.editing_mode == ADJUSTING:
                 self.editLabel.adjustRectPoints(self.labelPoint)
@@ -357,10 +383,13 @@ class ImageLabel(QLabel):
         if self.shape_mode == "Rect" and self.editLabel:
             if self.editLabel.editing_mode == CREATING:
                 if self.editLabel.startPoint and self.editLabel.endPoint:
-                    text = self.labelDialog.pop_up()
+                    text = self.labelDialog.popUp()
                     self.editLabel.appendRectPoint()
                     if not text or len(text) == 0:
                         self.editLabel.rectPoints.pop()
+                    else:
+                        self.editLabel.rectClasses.append(text)
+                        self.labelDialog.update(text)
         super(ImageLabel, self).mouseReleaseEvent(event)
         self.update()
 
@@ -433,17 +462,17 @@ class MainWindow(QMainWindow):
         operation_layout = QVBoxLayout()
 
         self.createRadiobox = QRadioButton('Creating', self)
-        self.createRadiobox.toggled.connect(self.changeCreatingMode)
+        self.createRadiobox.toggled.connect(self.changeEditMode)
         self.createRadiobox.setEnabled(False)
         operation_layout.addWidget(self.createRadiobox)
 
         self.moveRadiobox = QRadioButton('Moving', self)
-        self.moveRadiobox.toggled.connect(self.changeMovingMode)
+        self.moveRadiobox.toggled.connect(self.changeEditMode)
         self.moveRadiobox.setEnabled(False)
         operation_layout.addWidget(self.moveRadiobox)
 
         self.adjustRadiobox = QRadioButton('Adjusting', self)
-        self.adjustRadiobox.toggled.connect(self.changeAdjustMode)
+        self.adjustRadiobox.toggled.connect(self.changeEditMode)
         self.adjustRadiobox.setEnabled(False)
         operation_layout.addWidget(self.adjustRadiobox)
 
@@ -473,18 +502,14 @@ class MainWindow(QMainWindow):
             return
         self.imageLabel.tracking = False
 
-    def changeCreatingMode(self):
+    def changeEditMode(self, checked):
         if self.createRadiobox.isChecked():
             if self.imageLabel.editLabel:
                 self.imageLabel.editLabel.editing_mode = CREATING
-
-    def changeMovingMode(self):
-        if self.moveRadiobox.isChecked():
+        elif self.moveRadiobox.isChecked():
             if self.imageLabel.editLabel:
                 self.imageLabel.editLabel.editing_mode = MOVING
-
-    def changeAdjustMode(self):
-        if self.adjustRadiobox.isChecked():
+        elif self.adjustRadiobox.isChecked():
             if self.imageLabel.editLabel:
                 self.imageLabel.editLabel.editing_mode = ADJUSTING
 
@@ -496,7 +521,7 @@ class MainWindow(QMainWindow):
 
     def openImageDialog(self):
         options = QFileDialog.Options()
-        fileName, _ = QFileDialog.getOpenFileName(self, "QFileDialog.getOpenFileName()", "","All Files (*)", options=options)
+        fileName, _ = QFileDialog.getOpenFileName(self, "Open Image File", "","All Files (*)", options=options)
         if fileName:
             self.fileName = fileName
             self.imageLabel.image = QImage(fileName)
@@ -529,6 +554,43 @@ class MainWindow(QMainWindow):
 
     def changeNameText(self, text):
         self.nameText.setText(self.getFileName()[text])
+
+    def saveLabel(self):
+        if self.imageLabel.editLabel and len(self.imageLabel.editLabel.rectClasses) > 0:
+            folder_path = os.path.dirname(self.fileName)
+            folder_name = os.path.split(folder_path)[-1]
+            file_name = os.path.basename(self.fileName)
+            shape = [self.imageLabel.image.height(), 
+                    self.imageLabel.image.width(),
+                    1 if self.imageLabel.image.isGrayscale() else 3]
+
+            if self.imageLabel.labelDialog.writerType == SUPPORT_FMTS[0]:
+                writer = PascalVocWriter(folder_name, file_name, shape, 
+                                        local_img_path=self.fileName)
+                difficult = self.imageLabel.labelDialog.difficult
+                for className, rectPoint in zip(self.imageLabel.editLabel.rectClasses, 
+                                                self.imageLabel.editLabel.rectPoints):
+                    startP, endP = rectPoint
+                    startP = self.imageLabel.image_pos(startP)
+                    endP = self.imageLabel.image_pos(endP)
+                    xmin, xmax = sorted([int(startP.x()), int(endP.x())])
+                    ymin, ymax = sorted([int(startP.y()), int(endP.y())])
+                    writer.add_bnd_box(xmin, ymin, xmax, ymax, className, difficult)
+                target_file = self.fileName.split(".")[0] + ".xml"
+                print("file:", target_file)
+                writer.save(target_file=target_file)
+
+    def closeEvent(self, event):
+        result = QMessageBox.question(self,
+                      "Save before exit",
+                      "Would you like to save the label format?",
+                      QMessageBox.Yes| QMessageBox.No)
+        event.ignore()
+
+        if result == QMessageBox.Yes:
+            self.saveLabel()
+
+        event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
