@@ -20,7 +20,7 @@
 #version 20:弹出编辑格式文件保存提示框QMessage;轮廓撤销,轮廓删减;关闭不保存
 #version 21:鼠标接近,操作提示语;
 #version 22:图像语义分割框(Poly);Rect & Poly类整合;XML & JSON
-#version 23:载入编辑文件XML
+#version 23:载入标注文件(XML,JSON)
 #version 24:设置pypi包;设置package打包
 #version 25:添加图像拖拽功能;图像缩放功能
 
