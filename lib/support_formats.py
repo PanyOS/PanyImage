@@ -1,7 +1,15 @@
-import sys
+import os
 from xml.etree import ElementTree
 from xml.etree.ElementTree import Element, SubElement
 from lxml import etree
+import json
+import base64
+import io
+
+import PIL.ExifTags
+import PIL.Image
+import PIL.ImageOps
+
 import codecs
 
 XML_EXT = '.xml'
@@ -22,6 +30,70 @@ def setSubElements(root, elements_dict):
                         sub__ = SubElement(sub_, name__)
                         sub__.text = text__
     return root
+
+def apply_exif_orientation(image):
+    try:
+        exif = image._getexif()
+    except AttributeError:
+        exif = None
+
+    if exif is None:
+        return image
+
+    exif = {
+        PIL.ExifTags.TAGS[k]: v
+        for k, v in exif.items()
+        if k in PIL.ExifTags.TAGS
+    }
+
+    orientation = exif.get('Orientation', None)
+
+    if orientation == 1:
+        # do nothing
+        return image
+    elif orientation == 2:
+        # left-to-right mirror
+        return PIL.ImageOps.mirror(image)
+    elif orientation == 3:
+        # rotate 180
+        return image.transpose(PIL.Image.ROTATE_180)
+    elif orientation == 4:
+        # top-to-bottom mirror
+        return PIL.ImageOps.flip(image)
+    elif orientation == 5:
+        # top-to-left mirror
+        return PIL.ImageOps.mirror(image.transpose(PIL.Image.ROTATE_270))
+    elif orientation == 6:
+        # rotate 270
+        return image.transpose(PIL.Image.ROTATE_270)
+    elif orientation == 7:
+        # top-to-right mirror
+        return PIL.ImageOps.mirror(image.transpose(PIL.Image.ROTATE_90))
+    elif orientation == 8:
+        # rotate 90
+        return image.transpose(PIL.Image.ROTATE_90)
+    else:
+        return image
+
+def load_image_file(filename):
+    try:
+        image_pil = PIL.Image.open(filename)
+    except IOError:
+        print("Open Error")
+        return
+
+    # apply orientation to image according to exif
+    image_pil = apply_exif_orientation(image_pil)
+
+    with io.BytesIO() as f:
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in ['.jpg', '.jpeg']:
+            format = 'JPEG'
+        else:
+            format = 'PNG'
+        image_pil.save(f, format=format)
+        f.seek(0)
+        return f.read()
 
 class FormatWriter(object):
 
@@ -101,3 +173,24 @@ class PascalVocWriter(FormatWriter):
         prettify_result = self.prettify(root)
         out_file.write(prettify_result.decode('utf8'))
         out_file.close()
+
+class JsonWriter(FormatWriter):
+
+    def __init__(self, folder_name, filename, img_size, database_src='Unknown', local_img_path=None):
+        super().__init__(folder_name, filename, img_size, database_src, local_img_path)
+        self.flags = {}
+        self.shape_type = "polygon"
+        self.group_id = None
+        self.version = "1.0.0"
+
+    def save(self, shape_list, name):
+        imageData = load_image_file(self.local_img_path)
+        json_dict = {"version": self.version,
+                    "flags": self.flags,
+                    "shapes": shape_list,
+                    "imagePath": self.filename,
+                    "imageData": base64.b64encode(imageData).decode('utf-8'),
+                    "imageHeight": self.img_size[0],
+                    "imageWidth": self.img_size[1]}
+        with open(name, 'w') as f:
+            json.dump(json_dict, f, ensure_ascii=False, indent=2)
