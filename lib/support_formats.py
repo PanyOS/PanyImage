@@ -95,6 +95,40 @@ def load_image_file(filename):
         f.seek(0)
         return f.read()
 
+class FormatReader(object):
+
+    @staticmethod
+    def load_xml(fileName):
+        assert fileName.endswith(XML_EXT), "Unsupported file format"
+        parser = etree.XMLParser(encoding=ENCODE_METHOD)
+        xml_tree = ElementTree.parse(fileName, parser=parser).getroot()
+        shapes = []
+        try:
+            verified = xml_tree.attrib['verified']
+        except KeyError:
+            verified = False
+
+        for object_iter in xml_tree.findall('object'):
+            bnd_box = object_iter.find("bndbox")
+            label = object_iter.find('name').text
+            difficult = False
+            if object_iter.find('difficult') is not None:
+                difficult = bool(int(object_iter.find('difficult').text))
+            x_min = int(float(bnd_box.find('xmin').text))
+            y_min = int(float(bnd_box.find('ymin').text))
+            x_max = int(float(bnd_box.find('xmax').text))
+            y_max = int(float(bnd_box.find('ymax').text))
+            points = [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)]
+            shapes.append((label, points, None, None, difficult))
+        return {"shapes": shapes, 
+                "verified": verified}
+
+    @staticmethod
+    def load_json(fileName):
+        with open(fileName, "r") as f:
+            json_dict = json.load(f)
+        return json_dict
+
 class FormatWriter(object):
 
     def __init__(self, folder_name, filename, img_size, database_src='Unknown', local_img_path=None):

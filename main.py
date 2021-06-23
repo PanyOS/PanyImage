@@ -17,8 +17,8 @@
 #version 17:编辑顶点 三种模式划分
 #version 18:弹出标签框(图像class分类信息;编辑完成按钮;格式文件选项;截取功能) 轮廓编号i;图像内坐标XY信息 
 #version 19:关闭时有标注轮廓:提示保存,生成编辑文件(Pascal Voc);简化初始化参数
-#version 20:弹出编辑格式文件保存提示框QMessage;轮廓撤销,轮廓删减;关闭不保存
-#version 21:鼠标接近,操作提示语;
+#version 20:弹出编辑格式文件保存提示框QMessage;轮廓撤销,轮廓删减;
+#version 21:鼠标接近,操作提示语;保存状态修复
 #version 22:图像语义分割框(Poly);Rect & Poly类整合;XML & JSON
 #version 23:载入标注文件(XML,JSON)
 #version 24:设置pypi包;设置package打包
@@ -32,7 +32,7 @@ from PyQt5.QtGui import *
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 
-from lib.support_formats import PascalVocWriter, JsonWriter
+from lib.support_formats import FormatReader, PascalVocWriter, JsonWriter
 
 DISTANCE_LIMIT = 4
 CREATING, MOVING, ADJUSTING = list(range(3))
@@ -465,6 +465,32 @@ class ImageLabel(QLabel):
     def deleteShape(self):
         if self.editLabel:
             self.editLabel.moveDelete()
+
+    def loadLabel(self, labelName):
+        data_dict = None
+        if labelName and labelName.endswith(".xml"):
+            data_dict = FormatReader.load_xml(labelName)
+            data_dict['ext'] = ".xml"
+        elif labelName and labelName.endswith(".json"):
+            data_dict = FormatReader.load_json(labelName)
+            data_dict['ext'] = ".json"
+        return data_dict
+
+    def loadShapes(self, data_dict):
+        if data_dict and data_dict['ext'] == ".xml":
+            for label, points, _, _, _ in data_dict['shapes']:
+                x1, y1 = points[0]
+                x2, y2 = points[2]
+                self.editLabel.classes.append(label)
+                self.editLabel.shapes.append([self.canvas_pos(QPoint(x1, y1)), self.canvas_pos(QPoint(x2, y2))])
+        elif data_dict and data_dict['ext'] == ".json":
+            for shape_dict in data_dict['shapes']:
+                self.editLabel.classes.append(shape_dict["label"])
+                shape = []
+                for x, y in shape_dict["points"]:
+                    point = self.canvas_pos(QPoint(int(x), int(y)))
+                    shape.append(QPoint(point.x(), point.y()))
+                self.editLabel.shapes.append(shape)
     
     def checkImageRange(self, pos):
         return pos.x() >= 0 and pos.x() < self.image.width() * self.scale and pos.y() >= 0 and \
@@ -498,6 +524,30 @@ class ImageLabel(QLabel):
         painter.drawLine(hl1.x(), hl1.y(), hl2.x(), hl2.y())
         painter.drawLine(vl1.x(), vl1.y(), vl2.x(), vl2.y())
 
+    def paintShape(self, painter):
+        if self.shape_mode == "Rect":
+            if not self.editLabel:
+                self.editLabel = RectLabel()
+                self.parent().window().createRadiobox.setEnabled(True)
+                self.parent().window().moveRadiobox.setEnabled(True)
+                self.parent().window().adjustRadiobox.setEnabled(True)
+                self.parent().window().createRadiobox.setChecked(True)
+                self.parent().window().polyRadio.setEnabled(False)
+                self.parent().window().setLabelName()
+                self.labelDialog.formatCombobox.setCurrentIndex(0)
+            self.editLabel.paintRect(painter, self.labelPoint)
+        elif self.shape_mode == "Poly":
+            if not self.editLabel:
+                self.editLabel = PolyLabel()
+                self.parent().window().createRadiobox.setEnabled(True)
+                self.parent().window().moveRadiobox.setEnabled(True)
+                self.parent().window().adjustRadiobox.setEnabled(True)
+                self.parent().window().createRadiobox.setChecked(True)
+                self.parent().window().rectRadio.setEnabled(False)
+                self.parent().window().setLabelName()
+                self.labelDialog.formatCombobox.setCurrentIndex(2)
+            self.editLabel.paintPoly(painter, self.labelPoint)
+
     def paintEvent(self, event):
         super().paintEvent(event)
         if self.image.width() and self.checkImageRange(self.imagePoint):
@@ -507,26 +557,7 @@ class ImageLabel(QLabel):
                 self.drawTrackingLine(painter)
                 painter.drawText(QRect(self.labelPoint.x(), self.labelPoint.y(), 80, -60), 
                                 Qt.AlignCenter, "(%d, %d)" % (self.imagePoint.x(), self.imagePoint.y()))
-            if self.shape_mode == "Rect":
-                if not self.editLabel:
-                    self.editLabel = RectLabel()
-                    self.parent().window().createRadiobox.setEnabled(True)
-                    self.parent().window().moveRadiobox.setEnabled(True)
-                    self.parent().window().adjustRadiobox.setEnabled(True)
-                    self.parent().window().createRadiobox.setChecked(True)
-                    self.parent().window().polyRadio.setEnabled(False)
-                self.labelDialog.formatCombobox.setCurrentIndex(0)
-                self.editLabel.paintRect(painter, self.labelPoint)
-            elif self.shape_mode == "Poly":
-                if not self.editLabel:
-                    self.editLabel = PolyLabel()
-                    self.parent().window().createRadiobox.setEnabled(True)
-                    self.parent().window().moveRadiobox.setEnabled(True)
-                    self.parent().window().adjustRadiobox.setEnabled(True)
-                    self.parent().window().createRadiobox.setChecked(True)
-                    self.parent().window().rectRadio.setEnabled(False)
-                self.labelDialog.formatCombobox.setCurrentIndex(2)
-                self.editLabel.paintPoly(painter, self.labelPoint)
+            self.paintShape(painter)
 
         self.update()
 
@@ -604,6 +635,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.fileName = None
+        self.labelName = None
         self.setMouseTracking(False)
         self.setMenuBar()
         self.setToolBar()
@@ -724,6 +756,10 @@ class MainWindow(QMainWindow):
 
     def changeShapeMode(self, checked, text):
         self.imageLabel.shape_mode = text
+        if text == "Rect":
+            self.imageLabel.labelDialog.writerType = SUPPORT_FMTS[0]
+        elif text == "Poly":
+            self.imageLabel.labelDialog.writerType = SUPPORT_FMTS[2]
 
     def setStatusBar(self):
         self.status = self.statusBar()
@@ -742,22 +778,37 @@ class MainWindow(QMainWindow):
             self.imageLabel.adjustSize()
             self.setTable()
 
-    def saveLabelDialog(self):
-        options = QFileDialog.Options()
-        default_name = None
+    def loadLabel(self):
+        data_dict = self.imageLabel.loadLabel(self.labelName)
+        self.imageLabel.loadShapes(data_dict)
+
+    def setLabelName(self):
         if self.fileName and self.imageLabel and \
             self.imageLabel.shape_mode == "Rect" and \
             self.imageLabel.labelDialog.writerType == SUPPORT_FMTS[0]:
-            default_name = self.fileName.split(".")[0] + ".xml"
+            self.labelName = self.fileName.split(".")[0] + ".xml"
         elif self.fileName and self.imageLabel and \
             self.imageLabel.shape_mode == "Poly" and \
             self.imageLabel.labelDialog.writerType == SUPPORT_FMTS[2]:
-            default_name = self.fileName.split(".")[0] + ".json"
+            self.labelName = self.fileName.split(".")[0] + ".json"
+        self.loadLabel()
 
-        if default_name:
-            name, _ = QFileDialog.getSaveFileName(self, "Save File", default_name, "All Files (*)", options=options)
-            if name:
-                self.saveLabel(name)
+    def saveLabelDialog(self, event):
+        if self.labelName:
+            result = QMessageBox.question(self,
+                      "Save before exit",
+                      "Would you like to save the label format?",
+                      QMessageBox.Yes| QMessageBox.No)
+            event.ignore()
+
+            if result == QMessageBox.Yes:
+                if not os.path.exists(self.labelName):
+                    options = QFileDialog.Options()
+                    name, _ = QFileDialog.getSaveFileName(self, "Save File", self.labelName, "All Files (*)", options=options)
+                    if name:
+                        self.saveLabel(name)
+                else:
+                    self.saveLabel(self.labelName)
 
     def getFileName(self):
         path, fn = os.path.split(self.fileName)
@@ -811,11 +862,11 @@ class MainWindow(QMainWindow):
                                         local_img_path=self.fileName)
                 
                 shape_list = []
-                for className, shapePoint in zip(self.imageLabel.editLabel.classes, 
+                for className, shape in zip(self.imageLabel.editLabel.classes, 
                                                 self.imageLabel.editLabel.shapes):
                     shape_dict = {}
                     shapePoints = []
-                    for vertexPoint in shapePoint:
+                    for vertexPoint in shape:
                         imagePoint = self.imageLabel.image_pos(vertexPoint)
                         shapePoints.append([imagePoint.x(), imagePoint.y()])
                     shape_dict["label"] = className
@@ -828,15 +879,7 @@ class MainWindow(QMainWindow):
                 writer.save(shape_list, name)
 
     def closeEvent(self, event):
-        result = QMessageBox.question(self,
-                      "Save before exit",
-                      "Would you like to save the label format?",
-                      QMessageBox.Yes| QMessageBox.No)
-        event.ignore()
-
-        if result == QMessageBox.Yes:
-            self.saveLabelDialog()
-
+        self.saveLabelDialog(event)
         event.accept()
 
 if __name__ == "__main__":
