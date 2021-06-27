@@ -21,7 +21,7 @@
 #version 21:鼠标接近,操作提示语;保存状态修复
 #version 22:图像语义分割框(Poly);Rect & Poly类整合;XML & JSON
 #version 23:载入标注文件(XML,JSON)
-#version 24:设置pypi包;设置package打包
+#version 24:设置package打包
 #version 25:添加图像拖拽功能;图像缩放功能
 
 import os
@@ -37,37 +37,39 @@ from lib.support_formats import FormatReader, PascalVocWriter, JsonWriter
 DISTANCE_LIMIT = 4
 CREATING, MOVING, ADJUSTING = list(range(3))
 SUPPORT_FMTS = ["Pascal Voc", "Yolo", "Json"]
+MIN_SCALE = 0.5
+MAX_SCALE = 2.0
 
 class PointCalculator(object):
     @staticmethod
-    def pointInsideRect(labelPoint, rect):
+    def pointInsideRect(imagePoint, rect):
         startPoint, endPoint = rect
-        return (startPoint.x()-labelPoint.x()) * (endPoint.x()-labelPoint.x()) <= 0 and \
-                 (startPoint.y()-labelPoint.y()) * (endPoint.y()-labelPoint.y()) <= 0
+        return (startPoint.x()-imagePoint.x()) * (endPoint.x()-imagePoint.x()) <= 0 and \
+                 (startPoint.y()-imagePoint.y()) * (endPoint.y()-imagePoint.y()) <= 0
 
     @staticmethod
-    def pointInsidePolygon(labelPoint, poly):
+    def pointInsidePolygon(imagePoint, poly):
         qpoly = QPolygon(poly)
-        return qpoly.containsPoint(labelPoint, Qt.OddEvenFill)
+        return qpoly.containsPoint(imagePoint, Qt.OddEvenFill)
 
     @staticmethod
-    def euclidDis(labelPoint, disPoint):
-        return math.hypot(labelPoint.x() - disPoint.x(),
-                        labelPoint.y() - disPoint.y())
+    def euclidDis(imagePoint, disPoint):
+        return math.hypot(imagePoint.x() - disPoint.x(),
+                        imagePoint.y() - disPoint.y())
 
     @staticmethod
-    def rectDis(labelPoint, rect):
-        return min([abs(labelPoint.x()-rect[0].x()),
-                    abs(labelPoint.x()-rect[1].x()),
-                    abs(labelPoint.y()-rect[0].y()),
-                    abs(labelPoint.y()-rect[1].y())])
+    def rectDis(imagePoint, rect):
+        return min([abs(imagePoint.x()-rect[0].x()),
+                    abs(imagePoint.x()-rect[1].x()),
+                    abs(imagePoint.y()-rect[0].y()),
+                    abs(imagePoint.y()-rect[1].y())])
 
     @staticmethod
-    def polyDis(labelPoint, poly):
-        return min([PointCalculator.euclidDis(labelPoint, polyPoint) for polyPoint in poly])
+    def polyDis(imagePoint, poly):
+        return min([PointCalculator.euclidDis(imagePoint, polyPoint) for polyPoint in poly])
 
     @staticmethod
-    def nearestRectVertex(labelPoint, rects):
+    def nearestRectVertex(imagePoint, rects):
         rect_index = -1
         nearPoint = None
         distance = -1
@@ -75,7 +77,7 @@ class PointCalculator(object):
         for i, rect in enumerate(rects):
             x1, x2, y1, y2 = rect[0].x(), rect[1].x(), rect[0].y(), rect[1].y()
             for vertexPoint in [QPoint(x1, y1), QPoint(x1, y2), QPoint(x2, y1), QPoint(x2, y2)]:
-                current_distance = PointCalculator.euclidDis(labelPoint, vertexPoint)
+                current_distance = PointCalculator.euclidDis(imagePoint, vertexPoint)
                 if distance == -1 or distance > current_distance:
                     distance = current_distance
                     nearPoint = vertexPoint
@@ -86,7 +88,7 @@ class PointCalculator(object):
         return None, None
 
     @staticmethod
-    def nearestVertex(labelPoint, shapes):
+    def nearestVertex(imagePoint, shapes):
         shape_index = -1
         vertex_index = -1
         nearPoint = None
@@ -94,7 +96,7 @@ class PointCalculator(object):
         
         for i, shape in enumerate(shapes):
             for j, vertexPoint in enumerate(shape):
-                current_distance = PointCalculator.euclidDis(labelPoint, vertexPoint)
+                current_distance = PointCalculator.euclidDis(imagePoint, vertexPoint)
                 if distance == -1 or distance > current_distance:
                     distance = current_distance
                     nearPoint = vertexPoint
@@ -106,32 +108,33 @@ class PointCalculator(object):
         return None, None, None
 
     @staticmethod
-    def getReferPoint(labelPoint, rect):
-        xs = [rect[0].x(), rect[1].x()]
-        ys = [rect[0].y(), rect[1].y()]
-        xs.remove(labelPoint.x())
-        ys.remove(labelPoint.y())
-        return QPoint(xs[0], ys[0])
+    def getReferPoint(imagePoint, rect):
+        x, y = imagePoint.x(), imagePoint.y()
+        x1, x2 = rect[0].x(), rect[1].x()
+        y1, y2 = rect[0].y(), rect[1].y()
+        nx = x1 if abs(x-x1) > abs(x-x2) else x2
+        ny = y1 if abs(y-y1) > abs(y-y2) else y2
+        return QPoint(nx, ny)
 
     @staticmethod
-    def nearestRect(labelPoint, rects):
+    def nearestRect(imagePoint, rects):
         index = -1
         distance = -1
         for i, rect in enumerate(rects):
-            if PointCalculator.pointInsideRect(labelPoint, rect):
-                distanceRect = PointCalculator.rectDis(labelPoint, rect)
+            if PointCalculator.pointInsideRect(imagePoint, rect):
+                distanceRect = PointCalculator.rectDis(imagePoint, rect)
                 if distance == -1 or distance > distanceRect:
                     distance = distanceRect
                     index = i
         return index
 
     @staticmethod
-    def nearestPoly(labelPoint, polys):
+    def nearestPoly(imagePoint, polys):
         index = -1
         distance = -1
         for i, poly in enumerate(polys):
-            if PointCalculator.pointInsidePolygon(labelPoint, poly):
-                distancePoly = PointCalculator.polyDis(labelPoint, poly)
+            if PointCalculator.pointInsidePolygon(imagePoint, poly):
+                distancePoly = PointCalculator.polyDis(imagePoint, poly)
                 if distance == -1 or distance > distancePoly:
                     distance = distancePoly
                     index = i
@@ -141,15 +144,19 @@ class ShapeLabel(object):
 
     def __init__(self):
         super().__init__()
+        # 存放当前轮廓的轮廓点
         self.currentShape = []
         self.editing_mode = None
+        # Adjusting模式下的Adjusting状态;单个编辑点;编辑轮廓索引;编辑点索引
         self.adjustStatus = False
         self.nearPoint = None
         self.near_shape_index = -1
         self.near_vertex_index = -1
+        # Moving模式下的轮廓索引;基准点
         self.move_index = -1
         self.movePoint = None
         self.benchShape = []
+        # 轮廓及轮廓类别
         self.shapes = []
         self.classes = []
 
@@ -159,45 +166,38 @@ class ShapeLabel(object):
     def isAddShape(self):
         return True
 
-    def addPoint(self, labelPoint):
+    def addPoint(self, imagePoint):
         if self.isAddPoint():
-            self.currentShape.append(labelPoint)
+            self.currentShape.append(imagePoint)
 
     def addShape(self):
         if self.isAddShape():
             self.shapes.append(self.currentShape)
             self.currentShape = []
 
+    def clearShapes(self):
+        self.shapes.clear()
+        self.classes.clear()
+
     def createWithdrawal(self):
         if self.editing_mode == CREATING:
             if len(self.currentShape) > 0:
                 self.currentShape.pop()
 
-    def moveBench(self, labelPoint):
+    def moveBench(self, imagePoint):
         if not self.benchShape:
-            self.move_index = PointCalculator.nearestPoly(labelPoint, self.shapes)
+            self.move_index = PointCalculator.nearestPoly(imagePoint, self.shapes)
             if self.move_index >= 0:
-                self.movePoint = labelPoint
+                self.movePoint = imagePoint
                 self.benchShape = self.shapes[self.move_index]
         else:
             self.movePoint = None
             self.benchShape = None
 
-    def moveUpdate(self, labelPoint):
+    def moveUpdate(self, imagePoint):
         if self.move_index >= 0 and self.movePoint and self.benchShape:
             self.shapes[self.move_index] = \
-                [labelPoint - self.movePoint + benchPoint for benchPoint in self.benchShape]
-
-    def moveDelete(self):
-        if self.editing_mode == MOVING:
-            if self.move_index >= 0:
-                self.shapes.pop(self.move_index)
-                self.move_index = -1
-        elif self.editing_mode == ADJUSTING and self.adjustStatus and self.nearPoint:
-            adjust_shape = self.shapes[self.near_shape_index]
-            adjust_shape.pop(self.near_vertex_index)
-            self.shapes[self.near_shape_index] = adjust_shape
-            self.adjustStatus = False
+                [imagePoint - self.movePoint + benchPoint for benchPoint in self.benchShape]
 
     def changeAdjustStatus(self):
         if not self.adjustStatus and self.nearPoint:
@@ -205,34 +205,12 @@ class ShapeLabel(object):
         elif self.adjustStatus:
             self.adjustStatus = False
 
-    def adjustShape(self, labelPoint):
+    def adjustShape(self, imagePoint):
         if not self.adjustStatus:
-            self.nearPoint, self.near_shape_index, self.near_vertex_index = PointCalculator.nearestVertex(labelPoint, self.shapes)
+            self.nearPoint, self.near_shape_index, self.near_vertex_index = PointCalculator.nearestVertex(imagePoint, self.shapes)
         else:
             if self.shapes and self.nearPoint:
-                self.shapes[self.near_shape_index][self.near_vertex_index] = labelPoint
-
-    def drawCreateShape(self, painter, labelPoint):
-        painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
-        painter.setBrush(QBrush(Qt.red, Qt.BDiagPattern))
-        painter.drawPolyline(QPolygon(self.currentShape))
-        if len(self.currentShape) > 0:
-            painter.drawLine(self.currentShape[-1].x(), self.currentShape[-1].y(),
-                            labelPoint.x(), labelPoint.y())
-
-        painter.setBrush(QBrush(Qt.green, Qt.SolidPattern))
-        for vertexPoint in self.currentShape:
-            painter.drawEllipse(QPoint(vertexPoint.x(), vertexPoint.y()), 3, 3)
-    
-    def drawAdjustShape(self, painter):
-        shape = self.shapes[self.near_shape_index]
-        painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
-        painter.setBrush(QBrush(QColor(0, 255, 0, 30), Qt.SolidPattern))
-        painter.drawPolygon(QPolygon(shape))
-        painter.setPen(QPen(Qt.red, 2, Qt.SolidLine))
-        painter.setBrush(QBrush(Qt.red, Qt.SolidPattern))
-        for vertexPoint in shape:
-            painter.drawRect(vertexPoint.x()-5, vertexPoint.y()-5, 10, 10)
+                self.shapes[self.near_shape_index][self.near_vertex_index] = imagePoint
 
 class RectLabel(ShapeLabel):
 
@@ -245,92 +223,24 @@ class RectLabel(ShapeLabel):
             return True
         return False
 
-    def moveBench(self, labelPoint):
+    def moveBench(self, imagePoint):
         if not self.benchShape:
-            self.move_index = PointCalculator.nearestRect(labelPoint, self.shapes)
+            self.move_index = PointCalculator.nearestRect(imagePoint, self.shapes)
             if self.move_index >= 0:
-                self.movePoint = labelPoint
+                self.movePoint = imagePoint
                 self.benchShape = self.shapes[self.move_index]
         else:
             self.movePoint = None
             self.benchShape = None
 
-    def drawCreateShape(self, painter, labelPoint):
-        startPoint = None
-        endPoint = None
-        
-        if len(self.currentShape) == 2:
-            startPoint, endPoint = self.currentShape
-        elif len(self.currentShape) == 1:
-            startPoint = self.currentShape[0]
-
-        if startPoint:
-            painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
-            painter.setBrush(QBrush(Qt.red, Qt.BDiagPattern))
-            painter.drawRect(startPoint.x(), startPoint.y(), 
-                            labelPoint.x()-startPoint.x(),
-                            labelPoint.y()-startPoint.y())
-            painter.drawLine(startPoint.x(), startPoint.y(), 
-                            labelPoint.x(), labelPoint.y())
-            painter.setBrush(QBrush(Qt.green, Qt.SolidPattern))
-            painter.drawEllipse(QPoint(startPoint.x(), startPoint.y()), 3, 3)
-        if endPoint:
-            painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
-            painter.drawEllipse(QPoint(endPoint.x(), endPoint.y()), 3, 3)
-
-    def adjustShape(self, labelPoint):
+    def adjustShape(self, imagePoint):
         if not self.adjustStatus:
-            self.nearPoint, self.near_shape_index = PointCalculator.nearestRectVertex(labelPoint, self.shapes)
+            self.nearPoint, self.near_shape_index = PointCalculator.nearestRectVertex(imagePoint, self.shapes)
             if self.shapes and self.nearPoint:
                 self.referPoint = PointCalculator.getReferPoint(self.nearPoint, self.shapes[self.near_shape_index])
         else:
             if self.shapes and self.nearPoint:
-                self.shapes[self.near_shape_index] = [labelPoint, self.referPoint]
-
-    def drawAdjustShape(self, painter):
-        startPoint, endPoint = self.shapes[self.near_shape_index]
-        x1 = startPoint.x()
-        y1 = startPoint.y()
-        x2 = endPoint.x()
-        y2 = endPoint.y()
-        painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
-        painter.setBrush(QBrush(QColor(0, 255, 0, 30), Qt.SolidPattern))
-        painter.drawRect(x1, y1, x2-x1, y2-y1)
-        painter.setPen(QPen(Qt.red, 2, Qt.SolidLine))
-        painter.setBrush(QBrush(Qt.red, Qt.SolidPattern))
-        painter.drawRect(x1-5, y1-5, 10, 10)
-        painter.drawRect(x2-5, y1-5, 10, 10)
-        painter.drawRect(x1-5, y2-5, 10, 10)
-        painter.drawRect(x2-5, y2-5, 10, 10)
-    
-    def paintRect(self, painter, labelPoint):
-        painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
-        for i, [startPoint, endPoint] in enumerate(self.shapes):
-            if PointCalculator.pointInsideRect(labelPoint, [startPoint, endPoint]):
-                painter.setBrush(QBrush(QColor(0, 255, 0, 30), Qt.SolidPattern))
-            else:
-                painter.setBrush(QBrush(QColor(0, 255, 0, 0), Qt.SolidPattern))
-            if i == self.move_index and self.editing_mode == MOVING:
-                painter.setBrush(QBrush(QColor(0, 0, 255, 30), Qt.SolidPattern))
-            if i != self.near_shape_index:
-                painter.drawRect(startPoint.x(), startPoint.y(), 
-                                endPoint.x()-startPoint.x(),
-                                endPoint.y()-startPoint.y())
-
-        painter.setPen(QPen(Qt.blue, 2, Qt.SolidLine))
-        painter.setBrush(QBrush(Qt.blue, Qt.SolidPattern))
-        for i, [startPoint, endPoint] in enumerate(self.shapes):
-            if i != self.near_shape_index:
-                painter.drawEllipse(QPoint(startPoint.x(), startPoint.y()), 3, 3)
-                painter.drawEllipse(QPoint(startPoint.x(), endPoint.y()), 3, 3)
-                painter.drawEllipse(QPoint(endPoint.x(), endPoint.y()), 3, 3)
-                painter.drawEllipse(QPoint(endPoint.x(), startPoint.y()), 3, 3)
-        
-        if self.editing_mode == CREATING:
-            self.drawCreateShape(painter, labelPoint)
-        
-        if self.editing_mode == ADJUSTING and self.nearPoint:
-            self.drawAdjustShape(painter)
+                self.shapes[self.near_shape_index] = [imagePoint, self.referPoint]
 
 class PolyLabel(ShapeLabel):
 
@@ -338,12 +248,12 @@ class PolyLabel(ShapeLabel):
         ShapeLabel.__init__(self)
         self.currentClosed = False
 
-    def isClosePoint(self, labelPoint):
-        return len(self.currentShape) >= 2 and PointCalculator.euclidDis(labelPoint, self.currentShape[0]) <= DISTANCE_LIMIT
+    def isClosePoint(self, imagePoint):
+        return len(self.currentShape) >= 2 and PointCalculator.euclidDis(imagePoint, self.currentShape[0]) <= DISTANCE_LIMIT
 
-    def addPoint(self, labelPoint):
-        if not self.isClosePoint(labelPoint):
-            self.currentShape.append(labelPoint)
+    def addPoint(self, imagePoint):
+        if not self.isClosePoint(imagePoint):
+            self.currentShape.append(imagePoint)
         else:
             self.currentClosed = True
 
@@ -352,41 +262,6 @@ class PolyLabel(ShapeLabel):
             self.shapes.append(self.currentShape)
             self.currentShape = []
             self.currentClosed = False
-
-    def drawCreateShape(self, painter, labelPoint):
-        super().drawCreateShape(painter, labelPoint)
-        painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
-        painter.setBrush(QBrush(Qt.red, Qt.BDiagPattern))
-        if len(self.currentShape) >= 1 and self.isClosePoint(labelPoint):
-            painter.drawLine(self.currentShape[0].x(), self.currentShape[0].y(),
-                                labelPoint.x(), labelPoint.y())
-            painter.setBrush(QBrush(Qt.green, Qt.SolidPattern))
-            painter.drawEllipse(self.currentShape[0], 8, 8)
-
-    def paintPoly(self, painter, labelPoint):
-        painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
-        for i, shape in enumerate(self.shapes):
-            if PointCalculator.pointInsidePolygon(labelPoint, shape):
-                painter.setBrush(QBrush(QColor(0, 255, 0, 30), Qt.SolidPattern))
-            else:
-                painter.setBrush(QBrush(QColor(0, 255, 0, 0), Qt.SolidPattern))
-            if i == self.move_index and self.editing_mode == MOVING:
-                painter.setBrush(QBrush(QColor(0, 0, 255, 30), Qt.SolidPattern))
-            if i != self.near_shape_index:
-                painter.drawPolygon(QPolygon(shape))
-
-        painter.setPen(QPen(Qt.blue, 2, Qt.SolidLine))
-        painter.setBrush(QBrush(Qt.blue, Qt.SolidPattern))
-        for i, shape in enumerate(self.shapes):
-            if i != self.near_shape_index:
-                for vertexPoint in shape:
-                    painter.drawEllipse(QPoint(vertexPoint.x(), vertexPoint.y()), 3, 3)
-        
-        if self.editing_mode == CREATING:
-            self.drawCreateShape(painter, labelPoint)
-        
-        if self.editing_mode == ADJUSTING and self.nearPoint:
-            self.drawAdjustShape(painter)
 
 class LabelDialog(QDialog):
 
@@ -440,12 +315,16 @@ class ImageLabel(QLabel):
 
     def __init__(self):
         super().__init__()
+        self.setAcceptDrops(True)
+
         self.tracking = False
+        self.openStatus = False
         self.shape_mode = None
         self.editLabel = None
         self.labelDialog = LabelDialog(self)
 
         self.scale = 1
+        self.delta_scale = 0.1
         self.labelPoint = QPoint()
         self.imagePoint = QPoint()
 
@@ -458,13 +337,46 @@ class ImageLabel(QLabel):
         self.withdrawalShortcut = QShortcut(QKeySequence("Ctrl+Z"), self, activated=self.withdrawalShape)
         self.deleteShortcut = QShortcut(QKeySequence(Qt.Key_Delete), self, activated=self.deleteShape)
 
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+    
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            localPath = event.mimeData().urls()[0].toLocalFile()
+            self.parent().window().openImageFile(localPath)
+
+    def resetStatus(self):
+        self.tracking = False
+        self.openStatus = False
+        self.shape_mode = None
+        self.editLabel = None
+
+        self.scale = 1
+        self.delta_scale = 0.1
+        self.labelPoint = QPoint()
+        self.imagePoint = QPoint()
+        self.image = QImage()
+    
     def withdrawalShape(self):
         if self.editLabel:
             self.editLabel.createWithdrawal()
     
     def deleteShape(self):
         if self.editLabel:
-            self.editLabel.moveDelete()
+            if self.editLabel.editing_mode == MOVING:
+                if self.editLabel.move_index >= 0:
+                    self.editLabel.shapes.pop(self.editLabel.move_index)
+                    self.editLabel.classes.pop(self.editLabel.move_index)
+                    self.parent().window().shape_list.takeItem(self.editLabel.move_index)
+                    self.editLabel.move_index = -1
+            elif self.editLabel.editing_mode == ADJUSTING and self.editLabel.adjustStatus and self.editLabel.nearPoint:
+                adjust_shape = self.editLabel.shapes[self.editLabel.near_shape_index]
+                adjust_shape.pop(self.editLabel.near_vertex_index)
+                self.editLabel.shapes[self.editLabel.near_shape_index] = adjust_shape
+                self.editLabel.adjustStatus = False
 
     def loadLabel(self, labelName):
         data_dict = None
@@ -482,19 +394,45 @@ class ImageLabel(QLabel):
                 x1, y1 = points[0]
                 x2, y2 = points[2]
                 self.editLabel.classes.append(label)
-                self.editLabel.shapes.append([self.canvas_pos(QPoint(x1, y1)), self.canvas_pos(QPoint(x2, y2))])
+                self.editLabel.shapes.append([QPoint(x1, y1), QPoint(x2, y2)])
+                self.parent().window().addShapeItem(label)
         elif data_dict and data_dict['ext'] == ".json":
             for shape_dict in data_dict['shapes']:
                 self.editLabel.classes.append(shape_dict["label"])
                 shape = []
                 for x, y in shape_dict["points"]:
-                    point = self.canvas_pos(QPoint(int(x), int(y)))
-                    shape.append(QPoint(point.x(), point.y()))
+                    shape.append(QPoint(x, y))
                 self.editLabel.shapes.append(shape)
+                self.parent().window().addShapeItem(shape_dict["label"])
+
+    def checkNullImage(self):
+        return self.image.isNull()
     
     def checkImageRange(self, pos):
-        return pos.x() >= 0 and pos.x() < self.image.width() * self.scale and pos.y() >= 0 and \
-            pos.y() < self.image.height() * self.scale
+        return pos.x() >= 0 and pos.x() < self.image.width() and pos.y() >= 0 and \
+            pos.y() < self.image.height()
+                
+    def resizeImage(self):
+        pixmap = QPixmap.fromImage(self.image)
+        scaled_pixmap = pixmap.scaled(self.scale * pixmap.size())
+        self.setPixmap(scaled_pixmap)
+        self.adjustSize()
+    
+    def zoomIn(self):
+        if not self.checkNullImage():
+            new_scale = self.scale + self.delta_scale
+            if new_scale <= MAX_SCALE:
+                self.scale = new_scale
+                self.labelPoint = self.canvas_pos(self.imagePoint)
+                self.resizeImage()
+
+    def zoomOut(self):
+        if not self.checkNullImage():
+            new_scale = self.scale - self.delta_scale
+            if new_scale >= MIN_SCALE:
+                self.scale = new_scale
+                self.labelPoint = self.canvas_pos(self.imagePoint)
+                self.resizeImage()
 
     def offset_to_center(self):
         s = self.scale
@@ -503,7 +441,7 @@ class ImageLabel(QLabel):
         aw, ah = area.width(), area.height()
         x = (aw - w) / (2 * s) if aw > w else 0
         y = (ah - h) / (2 * s) if ah > h else 0
-        return QPointF(x, y)
+        return QPoint(x, y)
 
     def image_pos(self, point):
         return point / self.scale - self.offset_to_center()
@@ -511,22 +449,183 @@ class ImageLabel(QLabel):
     def canvas_pos(self, point):
         return (point + self.offset_to_center()) * self.scale
 
+    def canvas_shape(self, shape):
+        return [self.canvas_pos(imagePoint) for imagePoint in shape]
+
     def getImageRect(self):
         pos = self.canvas_pos(QPoint(0, 0))
-        return pos.x(), pos.y(), self.image.width() * self.scale, self.image.height() * self.scale
+        return pos.x(), pos.y(), self.image.width(), self.image.height()
 
     def drawTrackingLine(self, painter):
         _, _, w0, h0 = self.getImageRect()
-        hl1 = self.canvas_pos(QPoint(0, self.imagePoint.y()))
-        hl2 = self.canvas_pos(QPoint(w0, self.imagePoint.y()))
-        vl1 = self.canvas_pos(QPoint(self.imagePoint.x(), 0))
-        vl2 = self.canvas_pos(QPoint(self.imagePoint.x(), h0))
-        painter.drawLine(hl1.x(), hl1.y(), hl2.x(), hl2.y())
-        painter.drawLine(vl1.x(), vl1.y(), vl2.x(), vl2.y())
+        painterpath = QPainterPath()
+        painterpath.moveTo(self.canvas_pos(QPoint(0, self.imagePoint.y())))
+        painterpath.lineTo(self.canvas_pos(QPoint(w0, self.imagePoint.y())))
+        painterpath.moveTo(self.canvas_pos(QPoint(self.imagePoint.x(), 0)))
+        painterpath.lineTo(self.canvas_pos(QPoint(self.imagePoint.x(), h0)))
+        painter.drawPath(painterpath)
+
+    def drawCreateRect(self, painter):
+        startPoint = None
+        endPoint = None
+        
+        if len(self.editLabel.currentShape) == 2:
+            startPoint, endPoint = self.canvas_shape(self.editLabel.currentShape)
+        elif len(self.editLabel.currentShape) == 1:
+            startPoint = self.canvas_pos(self.editLabel.currentShape[0])
+
+        if startPoint:
+            painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
+            painter.setBrush(QBrush(Qt.red, Qt.BDiagPattern))
+            painterpath1 = QPainterPath()
+            painterpath1.addRect(startPoint.x(), startPoint.y(), 
+                            self.labelPoint.x()-startPoint.x(),
+                            self.labelPoint.y()-startPoint.y())
+            painterpath1.moveTo(startPoint)
+            painterpath1.lineTo(self.labelPoint)
+            painter.drawPath(painterpath1)
+
+            painter.setBrush(QBrush(Qt.green, Qt.SolidPattern))
+            painterpath2 = QPainterPath()
+            painterpath2.addEllipse(startPoint, 3, 3)
+            painter.drawPath(painterpath2)
+        if endPoint:
+            painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
+            painterpath2 = QPainterPath()
+            painterpath2.addEllipse(endPoint, 3, 3)
+            painter.drawPath(painterpath2)
+
+    def drawCreatePoly(self, painter):
+        painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
+        painter.setBrush(QBrush(Qt.green, Qt.NoBrush))
+        currentShape = self.canvas_shape(self.editLabel.currentShape)
+        painterpath1 = QPainterPath()
+        painterpath1.addPolygon(QPolygonF(currentShape))
+
+        if len(currentShape) > 0:
+            painterpath1.moveTo(currentShape[-1])
+            painterpath1.lineTo(self.labelPoint)
+        painter.drawPath(painterpath1)
+
+        painter.setBrush(QBrush(Qt.green, Qt.SolidPattern))
+        painterpath2 = QPainterPath()
+        for labelPoint in currentShape:
+            painterpath2.addEllipse(labelPoint, 3, 3)
+        painter.drawPath(painterpath2)
+
+    def drawAdjustRect(self, painter):
+        startPoint, endPoint = self.canvas_shape(self.editLabel.shapes[self.editLabel.near_shape_index])
+        painterpath1 = QPainterPath()
+        painterpath1.addRect(startPoint.x(), startPoint.y(), endPoint.x()-startPoint.x(), endPoint.y()-startPoint.y())
+        painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
+        painter.setBrush(QBrush(QColor(0, 255, 0, 30), Qt.SolidPattern))
+        painter.drawPath(painterpath1)
+        
+        painterpath2 = QPainterPath()
+        painterpath2.addRect(startPoint.x()-5, startPoint.y()-5, 10, 10)
+        painterpath2.addRect(endPoint.x()-5, startPoint.y()-5, 10, 10)
+        painterpath2.addRect(startPoint.x()-5, endPoint.y()-5, 10, 10)
+        painterpath2.addRect(endPoint.x()-5, endPoint.y()-5, 10, 10)
+        painter.setPen(QPen(Qt.red, 2, Qt.SolidLine))
+        painter.setBrush(QBrush(Qt.red, Qt.SolidPattern))
+        painter.drawPath(painterpath2)
+
+    def paintRect(self, painter):
+        painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
+        for i, shape in enumerate(self.editLabel.shapes):
+            if PointCalculator.pointInsideRect(self.imagePoint, shape):
+                painter.setBrush(QBrush(QColor(0, 255, 0, 30), Qt.SolidPattern))
+            else:
+                painter.setBrush(QBrush(QColor(0, 255, 0, 0), Qt.SolidPattern))
+            if i == self.editLabel.move_index and self.editLabel.editing_mode == MOVING:
+                painter.setBrush(QBrush(QColor(0, 0, 255, 30), Qt.SolidPattern))
+            if i != self.editLabel.near_shape_index:
+                startPoint, endPoint = self.canvas_shape(shape)
+                painterpath0 = QPainterPath()
+                painterpath0.addRect(startPoint.x(), startPoint.y(), 
+                                    endPoint.x()-startPoint.x(),
+                                    endPoint.y()-startPoint.y())
+                painter.drawPath(painterpath0)
+
+        painter.setPen(QPen(Qt.blue, 2, Qt.SolidLine))
+        painter.setBrush(QBrush(Qt.blue, Qt.SolidPattern))
+        for i, shape in enumerate(self.editLabel.shapes):
+            startPoint, endPoint = self.canvas_shape(shape)
+            if i != self.editLabel.near_shape_index:
+                painterpath1 = QPainterPath()
+                painterpath1.addEllipse(QPoint(startPoint.x(), startPoint.y()), 3, 3)
+                painterpath1.addEllipse(QPoint(startPoint.x(), endPoint.y()), 3, 3)
+                painterpath1.addEllipse(QPoint(endPoint.x(), endPoint.y()), 3, 3)
+                painterpath1.addEllipse(QPoint(endPoint.x(), startPoint.y()), 3, 3)
+                painter.drawPath(painterpath1)
+        
+        if self.editLabel.editing_mode == CREATING:
+            self.drawCreateRect(painter)
+        
+        if self.editLabel.editing_mode == ADJUSTING and self.editLabel.nearPoint:
+            self.drawAdjustRect(painter)
+
+    def drawCreateShape(self, painter):
+        self.drawCreatePoly(painter)
+        painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
+        painter.setBrush(QBrush(Qt.red, Qt.BDiagPattern))
+        if len(self.editLabel.currentShape) >= 1 and self.editLabel.isClosePoint(self.imagePoint):
+            painter.setBrush(QBrush(Qt.green, Qt.SolidPattern))
+            painterpath = QPainterPath()
+            painterpath.addEllipse(self.canvas_pos(self.editLabel.currentShape[0]), 8, 8)
+            painter.drawPath(painterpath)
+
+    def drawAdjustShape(self, painter):
+        shape = self.canvas_shape(self.editLabel.shapes[self.editLabel.near_shape_index])
+        painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
+        painter.setBrush(QBrush(QColor(0, 255, 0, 30), Qt.SolidPattern))
+        painterpath1 = QPainterPath()
+        painterpath1.addPolygon(QPolygonF(shape))
+        painterpath1.moveTo(painterpath1.currentPosition())
+        painterpath1.lineTo(QPointF(shape[0]))
+        painter.drawPath(painterpath1)
+
+        painter.setPen(QPen(Qt.red, 2, Qt.SolidLine))
+        painter.setBrush(QBrush(Qt.red, Qt.SolidPattern))
+        painterpath2 = QPainterPath()
+        for vertexPoint in shape:
+            painterpath2.addRect(vertexPoint.x()-5, vertexPoint.y()-5, 10, 10)
+        painter.drawPath(painterpath2)
+
+    def paintPoly(self, painter):
+        painter.setPen(QPen(Qt.green, 2, Qt.SolidLine))
+        for i, shape in enumerate(self.editLabel.shapes):
+            if PointCalculator.pointInsidePolygon(self.imagePoint, shape):
+                painter.setBrush(QBrush(QColor(0, 255, 0, 30), Qt.SolidPattern))
+            else:
+                painter.setBrush(QBrush(QColor(0, 255, 0, 0), Qt.SolidPattern))
+            if i == self.editLabel.move_index and self.editLabel.editing_mode == MOVING:
+                painter.setBrush(QBrush(QColor(0, 0, 255, 30), Qt.SolidPattern))
+            if i != self.editLabel.near_shape_index:
+                painterpath = QPainterPath()
+                painterpath.addPolygon(QPolygonF(self.canvas_shape(shape)))
+                painter.drawPath(painterpath)
+                painterpath.lineTo(QPointF(self.canvas_pos(shape[0])))
+                painter.drawPath(painterpath)
+
+        painter.setPen(QPen(Qt.blue, 2, Qt.SolidLine))
+        painter.setBrush(QBrush(Qt.blue, Qt.SolidPattern))
+        for i, shape in enumerate(self.editLabel.shapes):
+            if i != self.editLabel.near_shape_index:
+                painterpath = QPainterPath()
+                for vertexPoint in shape:
+                    painterpath.addEllipse(self.canvas_pos(vertexPoint), 3, 3)
+                painter.drawPath(painterpath)
+        
+        if self.editLabel.editing_mode == CREATING:
+            self.drawCreateShape(painter)
+        
+        if self.editLabel.editing_mode == ADJUSTING and self.editLabel.nearPoint:
+            self.drawAdjustShape(painter)
 
     def paintShape(self, painter):
         if self.shape_mode == "Rect":
-            if not self.editLabel:
+            if not self.editLabel and self.openStatus:
                 self.editLabel = RectLabel()
                 self.parent().window().createRadiobox.setEnabled(True)
                 self.parent().window().moveRadiobox.setEnabled(True)
@@ -535,9 +634,14 @@ class ImageLabel(QLabel):
                 self.parent().window().polyRadio.setEnabled(False)
                 self.parent().window().setLabelName()
                 self.labelDialog.formatCombobox.setCurrentIndex(0)
-            self.editLabel.paintRect(painter, self.labelPoint)
+                self.openStatus = False
+            elif self.editLabel and self.openStatus:
+                self.editLabel.clearShapes()
+                self.parent().window().setLabelName()
+                self.openStatus = False
+            self.paintRect(painter)
         elif self.shape_mode == "Poly":
-            if not self.editLabel:
+            if not self.editLabel and self.openStatus:
                 self.editLabel = PolyLabel()
                 self.parent().window().createRadiobox.setEnabled(True)
                 self.parent().window().moveRadiobox.setEnabled(True)
@@ -546,7 +650,12 @@ class ImageLabel(QLabel):
                 self.parent().window().rectRadio.setEnabled(False)
                 self.parent().window().setLabelName()
                 self.labelDialog.formatCombobox.setCurrentIndex(2)
-            self.editLabel.paintPoly(painter, self.labelPoint)
+                self.openStatus = False
+            elif self.editLabel and self.openStatus:
+                self.editLabel.clearShapes()
+                self.parent().window().setLabelName()
+                self.openStatus = False
+            self.paintPoly(painter)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -562,70 +671,84 @@ class ImageLabel(QLabel):
         self.update()
 
     def mousePressEvent(self, event):
-        self.labelPoint = event.pos()
-        self.imagePoint = self.image_pos(self.labelPoint)
-        if self.shape_mode == "Rect" and self.editLabel:
-            if self.editLabel.editing_mode == CREATING:
-                self.editLabel.addPoint(self.labelPoint)
-            elif self.editLabel.editing_mode == MOVING:
-                self.editLabel.moveBench(self.labelPoint)
-            elif self.editLabel.editing_mode == ADJUSTING:
-                self.editLabel.changeAdjustStatus()
-        elif self.shape_mode == "Poly" and self.editLabel:
-            if self.editLabel.editing_mode == CREATING:
-                self.editLabel.addPoint(self.labelPoint)
-            elif self.editLabel.editing_mode == MOVING:
-                self.editLabel.moveBench(self.labelPoint)
-            elif self.editLabel.editing_mode == ADJUSTING:
-                self.editLabel.changeAdjustStatus()
+        labelPoint = event.pos()
+        imagePoint = self.image_pos(labelPoint)
+        if self.checkImageRange(imagePoint):
+            self.labelPoint = labelPoint
+            self.imagePoint = imagePoint
+
+            if self.shape_mode == "Rect" and self.editLabel:
+                if self.editLabel.editing_mode == CREATING:
+                    self.editLabel.addPoint(self.imagePoint)
+                elif self.editLabel.editing_mode == MOVING:
+                    self.editLabel.moveBench(self.imagePoint)
+                elif self.editLabel.editing_mode == ADJUSTING:
+                    self.editLabel.changeAdjustStatus()
+            elif self.shape_mode == "Poly" and self.editLabel:
+                if self.editLabel.editing_mode == CREATING:
+                    self.editLabel.addPoint(self.imagePoint)
+                elif self.editLabel.editing_mode == MOVING:
+                    self.editLabel.moveBench(self.imagePoint)
+                elif self.editLabel.editing_mode == ADJUSTING:
+                    self.editLabel.changeAdjustStatus()
 
         super().mousePressEvent(event)
         self.update()
 
     def mouseMoveEvent(self, event):
-        self.labelPoint = event.pos()
-        self.imagePoint = self.image_pos(self.labelPoint)
-        if self.image.width() and self.checkImageRange(self.imagePoint):
-            self.parent().window().status.showMessage("X: %d Y: %d" % (self.imagePoint.x(), self.imagePoint.y()))
-        else:
-            self.parent().window().status.showMessage("")
-        if self.shape_mode == "Rect" and self.editLabel:
-            if self.editLabel.editing_mode == MOVING:
-                self.editLabel.moveUpdate(self.labelPoint)
-            elif self.editLabel.editing_mode == ADJUSTING:
-                self.editLabel.adjustShape(self.labelPoint)
-        if self.shape_mode == "Poly" and self.editLabel:
-            if self.editLabel.editing_mode == MOVING:
-                self.editLabel.moveUpdate(self.labelPoint)
-            elif self.editLabel.editing_mode == ADJUSTING:
-                self.editLabel.adjustShape(self.labelPoint)
+        labelPoint = event.pos()
+        imagePoint = self.image_pos(labelPoint)
+        if self.checkImageRange(imagePoint):
+            self.labelPoint = labelPoint
+            self.imagePoint = imagePoint
+
+            if self.image.width() and self.checkImageRange(self.imagePoint):
+                self.parent().window().status.showMessage("X: %d Y: %d" % (self.imagePoint.x(), self.imagePoint.y()))
+            else:
+                self.parent().window().status.showMessage("")
+            if self.shape_mode == "Rect" and self.editLabel:
+                if self.editLabel.editing_mode == MOVING:
+                    self.editLabel.moveUpdate(self.imagePoint)
+                elif self.editLabel.editing_mode == ADJUSTING:
+                    self.editLabel.adjustShape(self.imagePoint)
+            if self.shape_mode == "Poly" and self.editLabel:
+                if self.editLabel.editing_mode == MOVING:
+                    self.editLabel.moveUpdate(self.imagePoint)
+                elif self.editLabel.editing_mode == ADJUSTING:
+                    self.editLabel.adjustShape(self.imagePoint)
                 
         super().mouseMoveEvent(event)
         self.update()
 
     def mouseReleaseEvent(self, event):
-        self.labelPoint = event.pos()
-        self.imagePoint = self.image_pos(self.labelPoint)
-        if self.shape_mode == "Rect" and self.editLabel:
-            if self.editLabel.editing_mode == CREATING:
-                if len(self.editLabel.currentShape) == 2:
-                    text = self.labelDialog.popUp()
-                    self.editLabel.addShape()
-                    if not text or len(text) == 0:
-                        self.editLabel.shapes.pop()
-                    else:
-                        self.editLabel.classes.append(text)
-                        self.labelDialog.update(text)
-        elif self.shape_mode == "Poly" and self.editLabel:
-            if self.editLabel.editing_mode == CREATING:
-                if self.editLabel.isClosePoint(self.labelPoint):
-                    text = self.labelDialog.popUp()
-                    self.editLabel.addShape()
-                    if not text or len(text) == 0:
-                        self.editLabel.shapes.pop()
-                    else:
-                        self.editLabel.classes.append(text)
-                        self.labelDialog.update(text)
+        labelPoint = event.pos()
+        imagePoint = self.image_pos(labelPoint)
+        if self.checkImageRange(imagePoint):
+            self.labelPoint = labelPoint
+            self.imagePoint = imagePoint
+
+            if self.shape_mode == "Rect" and self.editLabel:
+                if self.editLabel.editing_mode == CREATING:
+                    if len(self.editLabel.currentShape) == 2:
+                        text = self.labelDialog.popUp()
+                        self.editLabel.addShape()
+                        if not text or len(text) == 0:
+                            self.editLabel.shapes.pop()
+                        else:
+                            self.editLabel.classes.append(text)
+                            self.parent().window().addShapeItem(text)
+                            self.labelDialog.update(text)
+            elif self.shape_mode == "Poly" and self.editLabel:
+                if self.editLabel.editing_mode == CREATING:
+                    if self.editLabel.isClosePoint(self.imagePoint):
+                        text = self.labelDialog.popUp()
+                        self.editLabel.addShape()
+                        if not text or len(text) == 0:
+                            self.editLabel.shapes.pop()
+                        else:
+                            self.editLabel.classes.append(text)
+                            self.parent().window().addShapeItem(text)
+                            self.labelDialog.update(text)
 
         super().mouseReleaseEvent(event)
         self.update()
@@ -634,6 +757,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self.version = "1.0.0"
         self.fileName = None
         self.labelName = None
         self.setMouseTracking(False)
@@ -642,6 +766,7 @@ class MainWindow(QMainWindow):
         self.setScrollArea()
         self.setPropertyDock()
         self.setTrackingDock()
+        self.setShapeDock()
         self.setStatusBar()
         self.resize(800, 600)
 
@@ -655,7 +780,31 @@ class MainWindow(QMainWindow):
 
     def setToolBar(self):
         self.toolbar = self.addToolBar('')
-        self.addToolBar(Qt.LeftToolBarArea, self.toolbar)
+        self.addToolBar(Qt.TopToolBarArea, self.toolbar)
+        zoomInAction = QAction("&Zoom In...", self, shortcut="Ctrl++", triggered=self.zoomIn)
+        zoomOutAction = QAction("&Zoom Out...", self, shortcut="Ctrl+-", triggered=self.zoomOut)
+        
+        zoomInButton = QToolButton()
+        zoomInButton.setText("Zoom In")
+        zoomInButton.setCheckable(True)
+        zoomInButton.setAutoExclusive(True)
+        zoomInButton.setToolButtonStyle(self.toolbar.toolButtonStyle())
+        zoomInButton.setDefaultAction(zoomInAction)
+        self.toolbar.addWidget(zoomInButton)
+
+        zoomOutButton = QToolButton()
+        zoomOutButton.setText("Zoom Out")
+        zoomOutButton.setCheckable(True)
+        zoomOutButton.setAutoExclusive(True)
+        zoomOutButton.setToolButtonStyle(self.toolbar.toolButtonStyle())
+        zoomOutButton.setDefaultAction(zoomOutAction)
+        self.toolbar.addWidget(zoomOutButton)
+
+    def zoomIn(self):
+        self.imageLabel.zoomIn()
+
+    def zoomOut(self):
+        self.imageLabel.zoomOut()
 
     def setScrollArea(self):
         scroll = QScrollArea()
@@ -695,9 +844,9 @@ class MainWindow(QMainWindow):
         self.trackingWidget = QWidget()
         whole_layout = QVBoxLayout()
 
-        trackCheckbox = QCheckBox('Tracking', self)
-        trackCheckbox.clicked.connect(self.changeTrackingMode)
-        whole_layout.addWidget(trackCheckbox)
+        self.trackCheckbox = QCheckBox('Tracking', self)
+        self.trackCheckbox.clicked.connect(self.changeTrackingMode)
+        whole_layout.addWidget(self.trackCheckbox)
 
         operationGroup = QGroupBox('Operate Mode:', self)
         operation_layout = QVBoxLayout()
@@ -737,6 +886,18 @@ class MainWindow(QMainWindow):
         self.trackingDock.setWidget(self.trackingWidget)
         self.addDockWidget(Qt.RightDockWidgetArea, self.trackingDock)
 
+    def setShapeDock(self):
+        self.shapeDock = QDockWidget("Image Shapes", self)
+        shapeWidget = QWidget()
+        shape_layout = QVBoxLayout()
+        # 对齐左上角
+        shape_layout.setContentsMargins(0, 0, 0, 0)
+        self.shape_list = QListWidget()
+        shape_layout.addWidget(self.shape_list)
+        shapeWidget.setLayout(shape_layout)
+        self.shapeDock.setWidget(shapeWidget)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.shapeDock)
+
     def changeTrackingMode(self, checked):
         if checked:
             self.imageLabel.tracking = True
@@ -764,23 +925,62 @@ class MainWindow(QMainWindow):
     def setStatusBar(self):
         self.status = self.statusBar()
 
-    def openImageDialog(self):
-        options = QFileDialog.Options()
-        fileName, _ = QFileDialog.getOpenFileName(self, "Open Image File", "", "All Files (*)", options=options)
+    def resetStatus(self):
+        self.trackCheckbox.setChecked(False)
+        self.createRadiobox.setAutoExclusive(False)
+        self.createRadiobox.setChecked(False)
+        self.createRadiobox.setAutoExclusive(True)
+        self.moveRadiobox.setAutoExclusive(False)
+        self.moveRadiobox.setChecked(False)
+        self.moveRadiobox.setAutoExclusive(True)
+        self.adjustRadiobox.setAutoExclusive(False)
+        self.adjustRadiobox.setChecked(False)
+        self.adjustRadiobox.setAutoExclusive(True)
+        self.createRadiobox.setEnabled(False)
+        self.moveRadiobox.setEnabled(False)
+        self.adjustRadiobox.setEnabled(False)
+        self.polyRadio.setAutoExclusive(False)
+        self.polyRadio.setChecked(False)
+        self.polyRadio.setAutoExclusive(True)
+        self.polyRadio.setEnabled(True)
+        self.rectRadio.setAutoExclusive(False)
+        self.rectRadio.setChecked(False)
+        self.rectRadio.setAutoExclusive(True)
+        self.rectRadio.setEnabled(True)
+        self.shape_list.clear()
+
+    def openImageFile(self, fileName):
         if fileName:
+            self.saveLabelDialog()
+            self.imageLabel.resetStatus()
+            self.resetStatus()
             self.fileName = fileName
             self.imageLabel.image = QImage(fileName)
-            if self.imageLabel.image.isNull():
+            if self.imageLabel.checkNullImage():
                 QMessageBox.information(self, "Warning", "Cannot load %s." % fileName)
                 return
 
             self.imageLabel.setPixmap(QPixmap.fromImage(self.imageLabel.image))
             self.imageLabel.adjustSize()
             self.setTable()
+            self.imageLabel.openStatus = True
+
+    def openImageDialog(self):
+        options = QFileDialog.Options()
+        fileName, _ = QFileDialog.getOpenFileName(self, "Open Image File", "", "All Files (*)", options=options)
+        self.openImageFile(fileName)
 
     def loadLabel(self):
-        data_dict = self.imageLabel.loadLabel(self.labelName)
-        self.imageLabel.loadShapes(data_dict)
+        if os.path.exists(self.labelName):
+            data_dict = self.imageLabel.loadLabel(self.labelName)
+            self.imageLabel.loadShapes(data_dict)
+
+    def addShapeItem(self, shape_class):
+        shape_item = QListWidgetItem()
+        shape_item.setText(shape_class)
+        shape_item.setFlags(shape_item.flags() | Qt.ItemIsUserCheckable)
+        shape_item.setCheckState(Qt.Checked)
+        self.shape_list.addItem(shape_item)
 
     def setLabelName(self):
         if self.fileName and self.imageLabel and \
@@ -793,13 +993,12 @@ class MainWindow(QMainWindow):
             self.labelName = self.fileName.split(".")[0] + ".json"
         self.loadLabel()
 
-    def saveLabelDialog(self, event):
+    def saveLabelDialog(self):
         if self.labelName:
             result = QMessageBox.question(self,
                       "Save before exit",
                       "Would you like to save the label format?",
                       QMessageBox.Yes| QMessageBox.No)
-            event.ignore()
 
             if result == QMessageBox.Yes:
                 if not os.path.exists(self.labelName):
@@ -849,8 +1048,6 @@ class MainWindow(QMainWindow):
                 for className, rectPoint in zip(self.imageLabel.editLabel.classes, 
                                                 self.imageLabel.editLabel.shapes):
                     startP, endP = rectPoint
-                    startP = self.imageLabel.image_pos(startP)
-                    endP = self.imageLabel.image_pos(endP)
                     xmin, xmax = sorted([int(startP.x()), int(endP.x())])
                     ymin, ymax = sorted([int(startP.y()), int(endP.y())])
                     writer.add_bnd_box(xmin, ymin, xmax, ymax, className, difficult)
@@ -867,8 +1064,7 @@ class MainWindow(QMainWindow):
                     shape_dict = {}
                     shapePoints = []
                     for vertexPoint in shape:
-                        imagePoint = self.imageLabel.image_pos(vertexPoint)
-                        shapePoints.append([imagePoint.x(), imagePoint.y()])
+                        shapePoints.append([vertexPoint.x(), vertexPoint.y()])
                     shape_dict["label"] = className
                     shape_dict["points"] = shapePoints
                     shape_dict["group_id"] = writer.group_id
@@ -879,7 +1075,7 @@ class MainWindow(QMainWindow):
                 writer.save(shape_list, name)
 
     def closeEvent(self, event):
-        self.saveLabelDialog(event)
+        self.saveLabelDialog()
         event.accept()
 
 if __name__ == "__main__":
