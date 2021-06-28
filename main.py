@@ -1,29 +1,3 @@
-#version 1:创建一个空窗体
-#version 2:创建一个带有菜单栏的窗体
-#version 3:创建一个带有工具栏的窗体
-#version 4:设置central组件
-#version 5:为File按键添加打开图像行为QAction
-#version 6:为Open按钮添加图像打开对话框触发行为:QFileDialog
-#version 7:打开图像,显示在QScroll面板上
-#version 8:打开图像,显示在QScroll面板上以外,右侧打开显示图像相关信息
-#version 9:图像相关信息table:(1)图像名;(2)图像宽高;(3)图像编码;(4)图像深度;(5)图像数值类型;(6)图像类型
-#version 10:图像状态栏显示坐标功能
-#version 11:mouse cursor cross line tracking
-#version 12:mouse cursor 跟随坐标
-#version 13:绘图格式自定义配置:组件设置
-#version 14:Rect轮廓编辑模式:添加透明色
-#version 15:抽取矩形编辑类:Rect轮廓
-#version 16:定义鼠标事件:轮廓可移动 鼠标靠近透明色
-#version 17:编辑顶点 三种模式划分
-#version 18:弹出标签框(图像class分类信息;编辑完成按钮;格式文件选项;截取功能) 轮廓编号i;图像内坐标XY信息 
-#version 19:关闭时有标注轮廓:提示保存,生成编辑文件(Pascal Voc);简化初始化参数
-#version 20:弹出编辑格式文件保存提示框QMessage;轮廓撤销,轮廓删减;
-#version 21:鼠标接近,操作提示语;保存状态修复
-#version 22:图像语义分割框(Poly);Rect & Poly类整合;XML & JSON
-#version 23:载入标注文件(XML,JSON)
-#version 24:设置package打包
-#version 25:添加图像拖拽功能;图像缩放功能
-
 import os
 import sys
 import math
@@ -144,19 +118,19 @@ class ShapeLabel(object):
 
     def __init__(self):
         super().__init__()
-        # 存放当前轮廓的轮廓点
+        # shape contour points
         self.currentShape = []
         self.editing_mode = None
-        # Adjusting模式下的Adjusting状态;单个编辑点;编辑轮廓索引;编辑点索引
+        # Adjusting Mode
         self.adjustStatus = False
         self.nearPoint = None
         self.near_shape_index = -1
         self.near_vertex_index = -1
-        # Moving模式下的轮廓索引;基准点
+        # Moving Mode
         self.move_index = -1
         self.movePoint = None
         self.benchShape = []
-        # 轮廓及轮廓类别
+        # shapes and shape class
         self.shapes = []
         self.classes = []
 
@@ -890,7 +864,6 @@ class MainWindow(QMainWindow):
         self.shapeDock = QDockWidget("Image Shapes", self)
         shapeWidget = QWidget()
         shape_layout = QVBoxLayout()
-        # 对齐左上角
         shape_layout.setContentsMargins(0, 0, 0, 0)
         self.shape_list = QListWidget()
         shape_layout.addWidget(self.shape_list)
